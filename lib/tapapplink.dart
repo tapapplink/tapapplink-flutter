@@ -99,6 +99,10 @@ class TapAppLink {
 
   static TapAppLinkOffer? getOffer() => _lastOffer;
 
+  static String? getAttributionId() => _lastAttributionId;
+
+  static String? getAppUserId() => _lastAppUserId;
+
   static Future<Map<String, dynamic>> linkRevenueCatUser(String appUserId) =>
       setAppUserId(appUserId);
 

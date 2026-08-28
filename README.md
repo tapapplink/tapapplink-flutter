@@ -9,11 +9,12 @@ dependencies:
   tapapplink: ^0.1.0
 ```
 
-Until pub.dev is live, path-depend on this repo.
+Then `flutter pub get`.
 
 ## Usage
 
 ```dart
+import 'package:flutter/foundation.dart';
 import 'package:tapapplink/tapapplink.dart';
 
 TapAppLink.configure(TapAppLinkConfig(
@@ -25,7 +26,14 @@ TapAppLink.configure(TapAppLinkConfig(
 
 await TapAppLink.trackInstall();
 await TapAppLink.setAppUserId(await Purchases.appUserID);
+
+final offer = TapAppLink.getOffer();
+await TapAppLink.applyCode('SARAH10');
 ```
+
+`trackInstall()` is safe on every launch — it only records once per install. Call `resetForTesting()` in debug builds before repeating a match test on the same install.
+
+Purchases are attributed through billing webhooks. Leave out a client `trackPurchase` call.
 
 ## License
 
