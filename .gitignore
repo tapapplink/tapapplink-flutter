@@ -1,0 +1,7 @@
+.dart_tool
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+build
+example/.dart_tool
+.DS_Store
