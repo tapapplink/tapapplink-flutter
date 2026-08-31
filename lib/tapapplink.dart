@@ -10,13 +10,11 @@ class TapAppLinkConfig {
     required this.publicKey,
     required this.environment,
     this.ingestUrl,
-    this.debugSessionId,
   });
 
   final String publicKey;
   final TapAppLinkEnvironment environment;
   final String? ingestUrl;
-  final String? debugSessionId;
 }
 
 class TapAppLinkOffer {
@@ -64,7 +62,6 @@ class TapAppLink {
       'networkContext': Platform.localeName.split('_').last,
       'installReferrer': installReferrer,
       'firstOpenAt': DateTime.now().toUtc().toIso8601String(),
-      'debugSessionId': _config?.debugSessionId,
     });
     _tracked = true;
     _cacheFromResult(result);
@@ -76,7 +73,6 @@ class TapAppLink {
     return _post('/ingestIdentify', {
       'appUserId': appUserId,
       'attributionId': _lastAttributionId,
-      'debugSessionId': _config?.debugSessionId,
     });
   }
 
@@ -91,7 +87,6 @@ class TapAppLink {
       'appUserId': _lastAppUserId,
       'attributionId': _lastAttributionId,
       'platform': platform,
-      'debugSessionId': _config?.debugSessionId,
     });
     _cacheFromResult(result);
     return result;

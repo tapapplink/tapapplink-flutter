@@ -6,7 +6,7 @@ Attribution SDK for Flutter. Call `configure`, `trackInstall`, and `setAppUserId
 
 ```yaml
 dependencies:
-  tapapplink: ^0.1.0
+  tapapplink: ^0.1.2
 ```
 
 Then `flutter pub get`.
