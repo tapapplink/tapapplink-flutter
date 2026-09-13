@@ -21,13 +21,11 @@ class TapAppLinkOffer {
   const TapAppLinkOffer({
     required this.creatorName,
     this.promoCode,
-    required this.discountBps,
     this.billingOfferId,
   });
 
   final String creatorName;
   final String? promoCode;
-  final int discountBps;
   final String? billingOfferId;
 }
 
@@ -127,7 +125,6 @@ class TapAppLink {
       _lastOffer = TapAppLinkOffer(
         creatorName: offer['creatorName'] as String? ?? '',
         promoCode: offer['promoCode'] as String?,
-        discountBps: offer['discountBps'] as int? ?? 0,
         billingOfferId: offer['billingOfferId'] as String?,
       );
     }
