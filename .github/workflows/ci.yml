@@ -1,6 +1,5 @@
 # Package checks on every PR and push to main.
-# Keep this workflow easy to extend when the SDK gains a native Android
-# plugin (e.g. add a job for Gradle / Play Install Referrer later).
+# The Android example build compiles the Play Install Referrer plugin side.
 name: CI
 
 on:
@@ -32,11 +31,40 @@ jobs:
         run: dart format --set-exit-if-changed .
 
       - name: Analyse
-        # Limit to package sources so the example app can evolve separately
-        # (e.g. when adding a native Android plugin later).
         run: flutter analyze lib test
 
       - name: Test
         run: flutter test
+
       - name: Publish dry-run
         run: dart pub publish --dry-run
+
+  android:
+    name: Example Android build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install example dependencies
+        working-directory: example
+        run: flutter pub get
+
+      - name: Build example debug APK
+        working-directory: example
+        run: flutter build apk --debug
