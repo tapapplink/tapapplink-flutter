@@ -5,11 +5,12 @@ import 'package:tapapplink/tapapplink.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   TapAppLink.configure(
-    const TapAppLinkConfig(
+    TapAppLinkConfig(
       publicKey: 'etk_test_replace_me',
       environment: kDebugMode
           ? TapAppLinkEnvironment.sandbox
           : TapAppLinkEnvironment.production,
+      debug: kDebugMode,
     ),
   );
   runApp(const ExampleApp());

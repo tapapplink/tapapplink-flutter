@@ -1,6 +1,6 @@
 name: tapapplink
 description: Tap App Link attribution SDK for Flutter apps.
-version: 0.2.0
+version: 0.3.0
 homepage: https://tapapplink.com
 repository: https://github.com/tapapplink/tapapplink-flutter
 issue_tracker: https://github.com/tapapplink/tapapplink-flutter/issues
@@ -12,6 +12,13 @@ dependencies:
   flutter:
     sdk: flutter
   http: ^1.2.2
+  shared_preferences: ^2.3.2
 dev_dependencies:
   flutter_test:
     sdk: flutter
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.tapapplink.tapapplink
+        pluginClass: TapAppLinkPlugin
