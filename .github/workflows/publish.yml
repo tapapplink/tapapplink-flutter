@@ -1,0 +1,17 @@
+# Publish to pub.dev when a version tag is pushed (e.g. v0.2.1).
+# Auth uses GitHub Actions OIDC; no pub.dev token is stored in the repo.
+#
+# One-time pub.dev setup (package admin): see README "Publishing" section.
+name: Publish to pub.dev
+
+on:
+  push:
+    tags:
+      # Must match the tag pattern configured on pub.dev: v{{version}}
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  publish:
+    permissions:
+      id-token: write # Required for OIDC authentication to pub.dev
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1

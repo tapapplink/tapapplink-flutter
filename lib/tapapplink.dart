@@ -138,9 +138,9 @@ class TapAppLink {
     if (cfg == null) {
       throw StateError('TapAppLink.configure() must be called first');
     }
-    final base = (cfg.ingestUrl ??
-            'https://us-central1-tapapplink.cloudfunctions.net')
-        .replaceAll(RegExp(r'/$'), '');
+    final base =
+        (cfg.ingestUrl ?? 'https://us-central1-tapapplink.cloudfunctions.net')
+            .replaceAll(RegExp(r'/$'), '');
     final payload = Map<String, dynamic>.from(body)
       ..removeWhere((key, value) => value == null);
     final response = await http.post(

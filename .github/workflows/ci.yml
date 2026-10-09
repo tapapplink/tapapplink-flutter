@@ -1,0 +1,42 @@
+# Package checks on every PR and push to main.
+# Keep this workflow easy to extend when the SDK gains a native Android
+# plugin (e.g. add a job for Gradle / Play Install Referrer later).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Format, analyse, test, publish dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Check formatting
+        run: dart format --set-exit-if-changed .
+
+      - name: Analyse
+        # Limit to package sources so the example app can evolve separately
+        # (e.g. when adding a native Android plugin later).
+        run: flutter analyze lib test
+
+      - name: Test
+        run: flutter test
+      - name: Publish dry-run
+        run: dart pub publish --dry-run
