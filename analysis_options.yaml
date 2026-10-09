@@ -1,5 +1,7 @@
 analyzer:
   exclude:
     - build/**
+    # Example app has its own analysis_options; keep package CI focused on the SDK.
+    - example/**
   language:
     strict-casts: true

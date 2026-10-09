@@ -35,6 +35,29 @@ await TapAppLink.applyCode('SARAH10');
 
 Purchases are attributed through billing webhooks. Leave out a client `trackPurchase` call.
 
+## Publishing
+
+CI runs format, analyse, test, and `dart pub publish --dry-run` on every PR and push to `main`.
+
+Releases publish to [pub.dev](https://pub.dev/packages/tapapplink) from GitHub Actions via OIDC (no stored token). Push a tag that matches the package version, for example:
+
+```bash
+git tag v0.2.1
+git push origin v0.2.1
+```
+
+The `version` in `pubspec.yaml` must match the tag (here `0.2.1`).
+
+### One-time pub.dev admin setting (Kenny)
+
+On https://pub.dev/packages/tapapplink/admin, under **Automated publishing**:
+
+1. Enable publishing from GitHub Actions.
+2. Repository: `tapapplink/tapapplink-flutter`
+3. Tag pattern: `v{{version}}`
+
+Without that, tag pushes will not be allowed to publish.
+
 ## License
 
 MIT
