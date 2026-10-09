@@ -6,7 +6,7 @@ Attribution SDK for Flutter. Call `configure`, `trackInstall`, and `setAppUserId
 
 ```yaml
 dependencies:
-  tapapplink: ^0.3.1
+  tapapplink: ^0.3.2
 ```
 
 Then `flutter pub get`.
@@ -110,11 +110,11 @@ CI runs format, analyse, test, publish dry-run, and an example Android debug bui
 Releases publish to [pub.dev](https://pub.dev/packages/tapapplink) from GitHub Actions via OIDC (no stored token). Push a tag that matches the package version, for example:
 
 ```bash
-git tag v0.3.1
-git push origin v0.3.1
+git tag v0.3.2
+git push origin v0.3.2
 ```
 
-The `version` in `pubspec.yaml` must match the tag (here `0.3.1`).
+The `version` in `pubspec.yaml` must match the tag (here `0.3.2`).
 
 ### One-time pub.dev admin setting (Kenny)
 

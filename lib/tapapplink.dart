@@ -124,7 +124,7 @@ class TapAppLink {
   TapAppLink._();
 
   /// Package / wire version sent as `X-TapAppLink-SDK-Version`.
-  static const String sdkVersion = '0.3.1';
+  static const String sdkVersion = '0.3.2';
 
   static const MethodChannel _installReferrerChannel =
       MethodChannel('com.tapapplink/tapapplink');
@@ -134,6 +134,9 @@ class TapAppLink {
   static const String _prefsAttributionId = 'tapapplink.attributionId';
   static const String _prefsOffer = 'tapapplink.offer';
   static const String _prefsAppUserId = 'tapapplink.appUserId';
+  static const String _prefsPendingRedeemRequestId =
+      'tapapplink.pendingRedeemRequestId';
+  static const String _prefsPendingRedeemCode = 'tapapplink.pendingRedeemCode';
 
   static TapAppLinkConfig? _config;
   static bool _storageLoaded = false;
@@ -142,6 +145,8 @@ class TapAppLink {
   static String? _lastAttributionId;
   static String? _lastAppUserId;
   static TapAppLinkOffer? _lastOffer;
+  static String? _pendingRedeemRequestId;
+  static String? _pendingRedeemCode;
 
   /// Override for tests. When null, a real [http.Client] is used.
   @visibleForTesting
@@ -205,20 +210,37 @@ class TapAppLink {
   ///
   /// On success returns the server JSON (may include `alreadyAttributed` and
   /// `offer`). On failure throws a [TapAppLinkApplyCodeException] subclass.
+  ///
+  /// Sends a stable `requestId` per normalised code attempt so the server can
+  /// recognise retries after a timeout or app restart. Definitive responses
+  /// (2xx, or unknown / inactive / wrong-environment) clear the pending id.
   static Future<Map<String, dynamic>> applyCode(String code) async {
     await _ensureLoaded();
+    final requestId = await _ensureRedeemRequestId(code);
     final platform = _platformName();
     try {
       final result = await _post('/redeemCode', {
         'code': code,
+        'requestId': requestId,
         'appUserId': _lastAppUserId,
         'attributionId': _lastAttributionId,
         'platform': platform,
       });
+      await _clearPendingRedeem();
       _cacheFromResult(result);
       await _persistState();
       return result;
+    } on TapAppLinkUnknownCodeException {
+      await _clearPendingRedeem();
+      rethrow;
+    } on TapAppLinkInactiveCodeException {
+      await _clearPendingRedeem();
+      rethrow;
+    } on TapAppLinkWrongEnvironmentException {
+      await _clearPendingRedeem();
+      rethrow;
     } on TapAppLinkApplyCodeException {
+      // Network / other: keep the pending requestId for retry.
       rethrow;
     } on SocketException catch (error) {
       throw TapAppLinkNetworkException(error.message);
@@ -259,6 +281,8 @@ class TapAppLink {
     _lastAttributionId = null;
     _lastAppUserId = null;
     _lastOffer = null;
+    _pendingRedeemRequestId = null;
+    _pendingRedeemCode = null;
     _storageLoaded = false;
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_prefsInstallId);
@@ -266,6 +290,8 @@ class TapAppLink {
     await prefs.remove(_prefsAttributionId);
     await prefs.remove(_prefsOffer);
     await prefs.remove(_prefsAppUserId);
+    await prefs.remove(_prefsPendingRedeemRequestId);
+    await prefs.remove(_prefsPendingRedeemCode);
   }
 
   /// Clears memory only so the next call reloads from shared_preferences.
@@ -276,8 +302,18 @@ class TapAppLink {
     _lastAttributionId = null;
     _lastAppUserId = null;
     _lastOffer = null;
+    _pendingRedeemRequestId = null;
+    _pendingRedeemCode = null;
     _storageLoaded = false;
   }
+
+  /// Pending redeem request id after a non-definitive attempt (test helper).
+  @visibleForTesting
+  static String? get debugPendingRedeemRequestId => _pendingRedeemRequestId;
+
+  /// Normalises a redeem code: uppercase, strip non-alphanumerics, max 24.
+  @visibleForTesting
+  static String normaliseCodeForTesting(String code) => _normaliseCode(code);
 
   static Future<void> _ensureLoaded() async {
     if (_storageLoaded) {
@@ -288,6 +324,8 @@ class TapAppLink {
     _tracked = prefs.getBool(_prefsTracked) ?? false;
     _lastAttributionId = prefs.getString(_prefsAttributionId);
     _lastAppUserId = prefs.getString(_prefsAppUserId);
+    _pendingRedeemRequestId = prefs.getString(_prefsPendingRedeemRequestId);
+    _pendingRedeemCode = prefs.getString(_prefsPendingRedeemCode);
     final offerRaw = prefs.getString(_prefsOffer);
     if (offerRaw != null) {
       final decoded = jsonDecode(offerRaw);
@@ -337,6 +375,54 @@ class TapAppLink {
     } else {
       await prefs.setString(_prefsOffer, jsonEncode(offer.toJson()));
     }
+    await _persistPendingRedeem(prefs);
+  }
+
+  static Future<void> _persistPendingRedeem(
+      [SharedPreferences? existing]) async {
+    final prefs = existing ?? await SharedPreferences.getInstance();
+    final requestId = _pendingRedeemRequestId;
+    final code = _pendingRedeemCode;
+    if (requestId == null || code == null) {
+      await prefs.remove(_prefsPendingRedeemRequestId);
+      await prefs.remove(_prefsPendingRedeemCode);
+    } else {
+      await prefs.setString(_prefsPendingRedeemRequestId, requestId);
+      await prefs.setString(_prefsPendingRedeemCode, code);
+    }
+  }
+
+  /// Uppercase, strip non-alphanumerics, truncate to 24 characters.
+  static String _normaliseCode(String code) {
+    final cleaned = code.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    if (cleaned.length <= 24) {
+      return cleaned;
+    }
+    return cleaned.substring(0, 24);
+  }
+
+  /// One requestId per normalised code until a definitive redeem response.
+  static Future<String> _ensureRedeemRequestId(String code) async {
+    final normalised = _normaliseCode(code);
+    final existingId = _pendingRedeemRequestId;
+    final existingCode = _pendingRedeemCode;
+    if (existingId != null &&
+        existingId.isNotEmpty &&
+        existingCode == normalised) {
+      return existingId;
+    }
+    final created = _generateInstallId();
+    _pendingRedeemRequestId = created;
+    _pendingRedeemCode = normalised;
+    await _persistPendingRedeem();
+    _log('pending redeem requestId=$created code=$normalised');
+    return created;
+  }
+
+  static Future<void> _clearPendingRedeem() async {
+    _pendingRedeemRequestId = null;
+    _pendingRedeemCode = null;
+    await _persistPendingRedeem();
   }
 
   static Map<String, dynamic> _storedInstallResult({required bool skipped}) {
@@ -522,7 +608,8 @@ class TapAppLink {
   static String _describeStoredState() {
     return 'tracked=$_tracked installId=$_installId '
         'attributionId=$_lastAttributionId appUserId=$_lastAppUserId '
-        'offer=${_lastOffer?.toJson()}';
+        'offer=${_lastOffer?.toJson()} '
+        'pendingRedeem=$_pendingRedeemCode/$_pendingRedeemRequestId';
   }
 
   static void _log(String message) {
