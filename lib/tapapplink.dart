@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -54,8 +55,76 @@ class TapAppLinkOffer {
   }
 }
 
+/// Thrown by [TapAppLink.applyCode] when redeem fails.
+///
+/// Cases: [TapAppLinkUnknownCodeException], [TapAppLinkInactiveCodeException],
+/// [TapAppLinkWrongEnvironmentException], [TapAppLinkNetworkException],
+/// [TapAppLinkApplyCodeOtherException].
+sealed class TapAppLinkApplyCodeException implements Exception {
+  const TapAppLinkApplyCodeException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => '$runtimeType: $message';
+}
+
+/// The code was not recognised (HTTP 404, or body `error: unknown_code`).
+final class TapAppLinkUnknownCodeException
+    extends TapAppLinkApplyCodeException {
+  const TapAppLinkUnknownCodeException([
+    super.message = 'Unknown code',
+  ]);
+}
+
+/// The code is no longer active (HTTP 410, or body `error: inactive_code`).
+final class TapAppLinkInactiveCodeException
+    extends TapAppLinkApplyCodeException {
+  const TapAppLinkInactiveCodeException([
+    super.message = 'Inactive code',
+  ]);
+}
+
+/// The code belongs to the other environment (Sandbox or Production).
+///
+/// Show customers the same copy as [TapAppLinkUnknownCodeException]. Log
+/// [developerWarning] for developers only; never show the word "environment"
+/// to customers.
+final class TapAppLinkWrongEnvironmentException
+    extends TapAppLinkApplyCodeException {
+  const TapAppLinkWrongEnvironmentException([
+    super.message = 'Wrong environment',
+  ]);
+
+  /// Developer-only warning. Do not show this string to customers.
+  static const String developerWarning =
+      'This code belongs to the other environment (Sandbox or Production). '
+      'Check your API key.';
+}
+
+/// Network failure or timeout while redeeming a code.
+final class TapAppLinkNetworkException extends TapAppLinkApplyCodeException {
+  const TapAppLinkNetworkException([
+    super.message = 'Network error',
+  ]);
+}
+
+/// Any other non-success redeem response.
+final class TapAppLinkApplyCodeOtherException
+    extends TapAppLinkApplyCodeException {
+  const TapAppLinkApplyCodeOtherException({
+    required this.status,
+    required String message,
+  }) : super(message);
+
+  final int status;
+}
+
 class TapAppLink {
   TapAppLink._();
+
+  /// Package / wire version sent as `X-TapAppLink-SDK-Version`.
+  static const String sdkVersion = '0.3.1';
 
   static const MethodChannel _installReferrerChannel =
       MethodChannel('com.tapapplink/tapapplink');
@@ -132,18 +201,34 @@ class TapAppLink {
     });
   }
 
+  /// Redeems a creator code via `/redeemCode`.
+  ///
+  /// On success returns the server JSON (may include `alreadyAttributed` and
+  /// `offer`). On failure throws a [TapAppLinkApplyCodeException] subclass.
   static Future<Map<String, dynamic>> applyCode(String code) async {
     await _ensureLoaded();
     final platform = _platformName();
-    final result = await _post('/redeemCode', {
-      'code': code,
-      'appUserId': _lastAppUserId,
-      'attributionId': _lastAttributionId,
-      'platform': platform,
-    });
-    _cacheFromResult(result);
-    await _persistState();
-    return result;
+    try {
+      final result = await _post('/redeemCode', {
+        'code': code,
+        'appUserId': _lastAppUserId,
+        'attributionId': _lastAttributionId,
+        'platform': platform,
+      });
+      _cacheFromResult(result);
+      await _persistState();
+      return result;
+    } on TapAppLinkApplyCodeException {
+      rethrow;
+    } on SocketException catch (error) {
+      throw TapAppLinkNetworkException(error.message);
+    } on TimeoutException catch (error) {
+      throw TapAppLinkNetworkException(error.message ?? 'Request timed out');
+    } on http.ClientException catch (error) {
+      throw TapAppLinkNetworkException(error.message);
+    } on HandshakeException catch (error) {
+      throw TapAppLinkNetworkException(error.message);
+    }
   }
 
   static TapAppLinkOffer? getOffer() => _lastOffer;
@@ -318,6 +403,7 @@ class TapAppLink {
     final headers = {
       'Authorization': 'Bearer ${cfg.publicKey}',
       'Content-Type': 'application/json',
+      'X-TapAppLink-SDK-Version': sdkVersion,
     };
     _log('request $path body=${jsonEncode(payload)} auth=Bearer [redacted]');
 
@@ -338,12 +424,78 @@ class TapAppLink {
 
     _log('response $path status=${response.statusCode} body=${response.body}');
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (path == '/redeemCode') {
+        throw _mapRedeemFailure(response.statusCode, response.body);
+      }
       throw HttpException(
         'TapAppLink request failed (${response.statusCode})',
       );
     }
     final decoded = jsonDecode(response.body);
     return decoded is Map<String, dynamic> ? decoded : {};
+  }
+
+  /// Maps redeem HTTP failures to typed [TapAppLinkApplyCodeException]s.
+  ///
+  /// Prefers the body `error` field (`unknown_code`, `inactive_code`,
+  /// `wrong_environment`). Falls back to status: 404 unknown, 410 inactive.
+  /// A 400 with `wrong_environment` is covered by the body mapping.
+  @visibleForTesting
+  static TapAppLinkApplyCodeException mapRedeemFailureForTesting(
+    int status,
+    String body,
+  ) =>
+      _mapRedeemFailure(status, body);
+
+  static TapAppLinkApplyCodeException _mapRedeemFailure(
+    int status,
+    String body,
+  ) {
+    String? errorCode;
+    String? serverMessage;
+    if (body.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(body);
+        if (decoded is Map) {
+          final err = decoded['error'];
+          if (err is String) {
+            errorCode = err;
+          }
+          final msg = decoded['message'];
+          if (msg is String) {
+            serverMessage = msg;
+          }
+        }
+      } on FormatException {
+        // Body is not JSON; fall through to status mapping.
+      }
+    }
+
+    switch (errorCode) {
+      case 'unknown_code':
+        return TapAppLinkUnknownCodeException(serverMessage ?? 'Unknown code');
+      case 'inactive_code':
+        return TapAppLinkInactiveCodeException(
+          serverMessage ?? 'Inactive code',
+        );
+      case 'wrong_environment':
+        return TapAppLinkWrongEnvironmentException(
+          serverMessage ?? 'Wrong environment',
+        );
+    }
+
+    if (status == 404) {
+      return const TapAppLinkUnknownCodeException();
+    }
+    if (status == 410) {
+      return const TapAppLinkInactiveCodeException();
+    }
+    // 400 + wrong_environment is handled via the body field above.
+    return TapAppLinkApplyCodeOtherException(
+      status: status,
+      message: serverMessage ??
+          (body.isNotEmpty ? body : 'TapAppLink request failed ($status)'),
+    );
   }
 
   static String _platformName() {
