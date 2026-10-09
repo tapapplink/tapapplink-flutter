@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -26,11 +27,25 @@ void main() {
     await TapAppLink.resetForTesting();
   });
 
+  void configureSandbox() {
+    TapAppLink.configure(
+      const TapAppLinkConfig(
+        publicKey: 'etk_test',
+        environment: TapAppLinkEnvironment.sandbox,
+        ingestUrl: 'https://example.invalid',
+      ),
+    );
+  }
+
   test('getters are null after resetForTesting', () {
     expect(TapAppLink.getOffer(), isNull);
     expect(TapAppLink.getAttributionId(), isNull);
     expect(TapAppLink.getAppUserId(), isNull);
     expect(TapAppLink.getInstallId(), isNull);
+  });
+
+  test('sdkVersion is 0.3.1', () {
+    expect(TapAppLink.sdkVersion, '0.3.1');
   });
 
   test('TapAppLinkConfig holds publicKey, environment, ingestUrl and debug',
@@ -91,6 +106,10 @@ void main() {
     expect(first['attributionId'], 'attr_1');
     expect(requests, hasLength(1));
     expect(requests.single.url.path, endsWith('/ingestInstall'));
+    expect(
+      requests.single.headers['X-TapAppLink-SDK-Version'],
+      TapAppLink.sdkVersion,
+    );
     final body = jsonDecode(requests.single.body) as Map<String, dynamic>;
     expect(body['installId'], isA<String>());
     expect(body['installId'], isNotEmpty);
@@ -117,13 +136,7 @@ void main() {
   });
 
   test('installReferrer parameter overrides the native referrer', () async {
-    TapAppLink.configure(
-      const TapAppLinkConfig(
-        publicKey: 'etk_test',
-        environment: TapAppLinkEnvironment.sandbox,
-        ingestUrl: 'https://example.invalid',
-      ),
-    );
+    configureSandbox();
     TapAppLink.debugInstallReferrerProvider = () async => 'native_referrer';
     TapAppLink.debugHttpClient = MockClient((request) async {
       requests.add(request);
@@ -157,6 +170,10 @@ void main() {
     await TapAppLink.setAppUserId('user_9');
     expect(requests, hasLength(1));
     expect(requests.single.url.path, endsWith('/ingestIdentify'));
+    expect(
+      requests.single.headers['X-TapAppLink-SDK-Version'],
+      '0.3.1',
+    );
     final body = jsonDecode(requests.single.body) as Map<String, dynamic>;
     expect(body['appUserId'], 'user_9');
     expect(body['attributionId'], 'attr_stored');
@@ -173,14 +190,28 @@ void main() {
     );
   });
 
-  test('missing install referrer plugin is treated as unavailable', () async {
-    TapAppLink.configure(
-      const TapAppLinkConfig(
-        publicKey: 'etk_test',
-        environment: TapAppLinkEnvironment.sandbox,
-        ingestUrl: 'https://example.invalid',
-      ),
+  test('non-2xx on trackInstall throws HttpException and is not success',
+      () async {
+    configureSandbox();
+    TapAppLink.debugHttpClient = MockClient((request) async {
+      requests.add(request);
+      return http.Response(
+        jsonEncode({'error': 'server_error', 'matched': true}),
+        500,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    await expectLater(
+      TapAppLink.trackInstall(),
+      throwsA(isA<HttpException>()),
     );
+    expect(TapAppLink.getAttributionId(), isNull);
+    expect(TapAppLink.getOffer(), isNull);
+  });
+
+  test('missing install referrer plugin is treated as unavailable', () async {
+    configureSandbox();
     // No debugInstallReferrerProvider: channel is missing in unit tests.
     TapAppLink.debugHttpClient = MockClient((request) async {
       requests.add(request);
@@ -220,13 +251,7 @@ void main() {
           .invokeMethod<String>('getInstallReferrer', {'timeoutMs': 3000});
       return value;
     };
-    TapAppLink.configure(
-      const TapAppLinkConfig(
-        publicKey: 'etk_test',
-        environment: TapAppLinkEnvironment.sandbox,
-        ingestUrl: 'https://example.invalid',
-      ),
-    );
+    configureSandbox();
     TapAppLink.debugHttpClient = MockClient((request) async {
       requests.add(request);
       return http.Response('{}', 200);
@@ -235,5 +260,201 @@ void main() {
     await TapAppLink.trackInstall();
     final body = jsonDecode(requests.single.body) as Map<String, dynamic>;
     expect(body['installReferrer'], 'channel_referrer');
+  });
+
+  group('applyCode', () {
+    test('success caches offer and sends SDK version header', () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        requests.add(request);
+        return http.Response(
+          jsonEncode({
+            'attributionId': 'attr_new',
+            'offer': {
+              'creatorName': 'Sarah',
+              'promoCode': 'SARAH10',
+            },
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final result = await TapAppLink.applyCode('SARAH10');
+      expect(result['attributionId'], 'attr_new');
+      expect(result.containsKey('alreadyAttributed'), isFalse);
+      expect(requests.single.url.path, endsWith('/redeemCode'));
+      expect(
+        requests.single.headers['X-TapAppLink-SDK-Version'],
+        '0.3.1',
+      );
+      expect(TapAppLink.getOffer()?.creatorName, 'Sarah');
+      expect(TapAppLink.getAttributionId(), 'attr_new');
+    });
+
+    test('success with alreadyAttributed true still returns the body',
+        () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({
+            'alreadyAttributed': true,
+            'attributionId': 'attr_existing',
+            'offer': {'creatorName': 'Sarah', 'promoCode': 'SARAH10'},
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final result = await TapAppLink.applyCode('SARAH10');
+      expect(result['alreadyAttributed'], isTrue);
+      expect(TapAppLink.getAttributionId(), 'attr_existing');
+    });
+
+    test('unknown_code body on 404 throws TapAppLinkUnknownCodeException',
+        () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({'error': 'unknown_code', 'message': 'No such code'}),
+          404,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      await expectLater(
+        TapAppLink.applyCode('NOPE'),
+        throwsA(isA<TapAppLinkUnknownCodeException>()),
+      );
+      expect(TapAppLink.getOffer(), isNull);
+    });
+
+    test('legacy 404 without body error field maps to unknownCode', () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        return http.Response('not found', 404);
+      });
+
+      await expectLater(
+        TapAppLink.applyCode('NOPE'),
+        throwsA(isA<TapAppLinkUnknownCodeException>()),
+      );
+    });
+
+    test('legacy 404 with unknown_code body maps to unknownCode', () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({'error': 'unknown_code'}),
+          404,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      await expectLater(
+        TapAppLink.applyCode('NOPE'),
+        throwsA(isA<TapAppLinkUnknownCodeException>()),
+      );
+    });
+
+    test('inactive_code body on 410 throws TapAppLinkInactiveCodeException',
+        () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({'error': 'inactive_code'}),
+          410,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      await expectLater(
+        TapAppLink.applyCode('OLD'),
+        throwsA(isA<TapAppLinkInactiveCodeException>()),
+      );
+    });
+
+    test('410 without body error field maps to inactiveCode', () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        return http.Response('Gone', 410);
+      });
+
+      await expectLater(
+        TapAppLink.applyCode('OLD'),
+        throwsA(isA<TapAppLinkInactiveCodeException>()),
+      );
+    });
+
+    test('wrong_environment on 400 throws TapAppLinkWrongEnvironmentException',
+        () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({'error': 'wrong_environment'}),
+          400,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      await expectLater(
+        TapAppLink.applyCode('LIVEONLY'),
+        throwsA(isA<TapAppLinkWrongEnvironmentException>()),
+      );
+      expect(
+        TapAppLinkWrongEnvironmentException.developerWarning,
+        'This code belongs to the other environment (Sandbox or Production). '
+        'Check your API key.',
+      );
+    });
+
+    test('other non-2xx throws TapAppLinkApplyCodeOtherException', () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({'error': 'rate_limited', 'message': 'Slow down'}),
+          429,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      try {
+        await TapAppLink.applyCode('SARAH10');
+        fail('expected TapAppLinkApplyCodeOtherException');
+      } on TapAppLinkApplyCodeOtherException catch (error) {
+        expect(error.status, 429);
+        expect(error.message, 'Slow down');
+      }
+    });
+
+    test('network failure throws TapAppLinkNetworkException', () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        throw const SocketException('Failed host lookup');
+      });
+
+      await expectLater(
+        TapAppLink.applyCode('SARAH10'),
+        throwsA(isA<TapAppLinkNetworkException>()),
+      );
+    });
+
+    test('mapRedeemFailure prefers body error over status', () {
+      final mapped = TapAppLink.mapRedeemFailureForTesting(
+        404,
+        jsonEncode({'error': 'inactive_code'}),
+      );
+      expect(mapped, isA<TapAppLinkInactiveCodeException>());
+    });
+
+    test('mapRedeemFailure 400 without wrong_environment is other', () {
+      final mapped = TapAppLink.mapRedeemFailureForTesting(
+        400,
+        jsonEncode({'error': 'bad_request', 'message': 'Bad'}),
+      );
+      expect(mapped, isA<TapAppLinkApplyCodeOtherException>());
+      expect((mapped as TapAppLinkApplyCodeOtherException).status, 400);
+    });
   });
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- **Fixed:** Android and React Native 0.3.0 could return an error from `applyCode()` as if it were a normal result, so an app could show a code as applied when it wasn't. Upgrade to 0.3.1, which raises a typed error for unknown, inactive and wrong-environment codes. iOS and Flutter 0.3.0 threw a generic error, and 0.3.1 makes it typed.
+- Check HTTP status on every SDK request; non-2xx responses are never treated as success.
+- Send `X-TapAppLink-SDK-Version: 0.3.1` on all requests.
+
 ## 0.3.0
 
 - Persist install state with `shared_preferences` (install id, tracked flag, attribution id, offer).
