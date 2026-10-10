@@ -44,8 +44,8 @@ void main() {
     expect(TapAppLink.getInstallId(), isNull);
   });
 
-  test('sdkVersion is 0.3.1', () {
-    expect(TapAppLink.sdkVersion, '0.3.1');
+  test('sdkVersion is 0.3.2', () {
+    expect(TapAppLink.sdkVersion, '0.3.2');
   });
 
   test('TapAppLinkConfig holds publicKey, environment, ingestUrl and debug',
@@ -172,7 +172,7 @@ void main() {
     expect(requests.single.url.path, endsWith('/ingestIdentify'));
     expect(
       requests.single.headers['X-TapAppLink-SDK-Version'],
-      '0.3.1',
+      '0.3.2',
     );
     final body = jsonDecode(requests.single.body) as Map<String, dynamic>;
     expect(body['appUserId'], 'user_9');
@@ -286,10 +286,14 @@ void main() {
       expect(requests.single.url.path, endsWith('/redeemCode'));
       expect(
         requests.single.headers['X-TapAppLink-SDK-Version'],
-        '0.3.1',
+        '0.3.2',
       );
+      final body = jsonDecode(requests.single.body) as Map<String, dynamic>;
+      expect(body['requestId'], isA<String>());
+      expect(body['requestId'], isNotEmpty);
       expect(TapAppLink.getOffer()?.creatorName, 'Sarah');
       expect(TapAppLink.getAttributionId(), 'attr_new');
+      expect(TapAppLink.debugPendingRedeemRequestId, isNull);
     });
 
     test('success with alreadyAttributed true still returns the body',
@@ -455,6 +459,218 @@ void main() {
       );
       expect(mapped, isA<TapAppLinkApplyCodeOtherException>());
       expect((mapped as TapAppLinkApplyCodeOtherException).status, 400);
+    });
+
+    test('normaliseCode uppercases, strips non-alphanumerics, max 24', () {
+      expect(TapAppLink.normaliseCodeForTesting('sarah-10'), 'SARAH10');
+      const longCode = 'abc-def-ghi-jkl-mno-pqr-stu-vwx-yz0-123';
+      final normalised = TapAppLink.normaliseCodeForTesting(longCode);
+      expect(normalised, 'ABCDEFGHIJKLMNOPQRSTUVWX');
+      expect(normalised.length, 24);
+    });
+
+    test('retry after timeout reuses the same requestId', () async {
+      configureSandbox();
+      var attempt = 0;
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        requests.add(request);
+        attempt += 1;
+        if (attempt == 1) {
+          throw const SocketException('Connection timed out');
+        }
+        return http.Response(
+          jsonEncode({
+            'attributionId': 'attr_1',
+            'offer': {'creatorName': 'Sarah', 'promoCode': 'SARAH10'},
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      await expectLater(
+        TapAppLink.applyCode('SARAH10'),
+        throwsA(isA<TapAppLinkNetworkException>()),
+      );
+      final firstId = TapAppLink.debugPendingRedeemRequestId;
+      expect(firstId, isNotNull);
+
+      final result = await TapAppLink.applyCode('sarah-10');
+      expect(result['attributionId'], 'attr_1');
+      expect(requests, hasLength(2));
+      final firstBody = jsonDecode(requests[0].body) as Map<String, dynamic>;
+      final secondBody = jsonDecode(requests[1].body) as Map<String, dynamic>;
+      expect(firstBody['requestId'], firstId);
+      expect(secondBody['requestId'], firstId);
+      expect(TapAppLink.debugPendingRedeemRequestId, isNull);
+    });
+
+    test('restart with a pending attempt reuses the same requestId', () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        requests.add(request);
+        throw const SocketException('Failed host lookup');
+      });
+
+      await expectLater(
+        TapAppLink.applyCode('SARAH10'),
+        throwsA(isA<TapAppLinkNetworkException>()),
+      );
+      final pendingId = TapAppLink.debugPendingRedeemRequestId;
+      expect(pendingId, isNotNull);
+
+      TapAppLink.debugClearMemory();
+      expect(TapAppLink.debugPendingRedeemRequestId, isNull);
+
+      var call = 0;
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        requests.add(request);
+        call += 1;
+        return http.Response(
+          jsonEncode({'attributionId': 'attr_restart'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+      configureSandbox();
+
+      await TapAppLink.applyCode('SARAH10');
+      expect(call, 1);
+      final body = jsonDecode(requests.last.body) as Map<String, dynamic>;
+      expect(body['requestId'], pendingId);
+      expect(TapAppLink.debugPendingRedeemRequestId, isNull);
+    });
+
+    test('a new code gets a new requestId and replaces the pending one',
+        () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        requests.add(request);
+        throw const SocketException('timeout');
+      });
+
+      await expectLater(
+        TapAppLink.applyCode('CODEONE'),
+        throwsA(isA<TapAppLinkNetworkException>()),
+      );
+      final firstId = TapAppLink.debugPendingRedeemRequestId;
+      expect(firstId, isNotNull);
+
+      await expectLater(
+        TapAppLink.applyCode('CODETWO'),
+        throwsA(isA<TapAppLinkNetworkException>()),
+      );
+      final secondId = TapAppLink.debugPendingRedeemRequestId;
+      expect(secondId, isNotNull);
+      expect(secondId, isNot(firstId));
+      final bodies = requests
+          .map((r) => jsonDecode(r.body) as Map<String, dynamic>)
+          .toList();
+      expect(bodies[0]['requestId'], firstId);
+      expect(bodies[1]['requestId'], secondId);
+    });
+
+    test('definitive responses clear the pending requestId', () async {
+      configureSandbox();
+
+      Future<void> expectClearedAfter(
+        Future<void> Function() action,
+      ) async {
+        TapAppLink.debugHttpClient = MockClient((request) async {
+          throw const SocketException('timeout');
+        });
+        await expectLater(
+          TapAppLink.applyCode('HOLD'),
+          throwsA(isA<TapAppLinkNetworkException>()),
+        );
+        expect(TapAppLink.debugPendingRedeemRequestId, isNotNull);
+        await action();
+        expect(TapAppLink.debugPendingRedeemRequestId, isNull);
+      }
+
+      await expectClearedAfter(() async {
+        TapAppLink.debugHttpClient = MockClient((request) async {
+          return http.Response(
+            jsonEncode({'attributionId': 'attr_ok'}),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        });
+        await TapAppLink.applyCode('HOLD');
+      });
+
+      await expectClearedAfter(() async {
+        TapAppLink.debugHttpClient = MockClient((request) async {
+          return http.Response(
+            jsonEncode({'error': 'unknown_code'}),
+            404,
+            headers: {'content-type': 'application/json'},
+          );
+        });
+        await expectLater(
+          TapAppLink.applyCode('HOLD'),
+          throwsA(isA<TapAppLinkUnknownCodeException>()),
+        );
+      });
+
+      await expectClearedAfter(() async {
+        TapAppLink.debugHttpClient = MockClient((request) async {
+          return http.Response(
+            jsonEncode({'error': 'inactive_code'}),
+            410,
+            headers: {'content-type': 'application/json'},
+          );
+        });
+        await expectLater(
+          TapAppLink.applyCode('HOLD'),
+          throwsA(isA<TapAppLinkInactiveCodeException>()),
+        );
+      });
+
+      await expectClearedAfter(() async {
+        TapAppLink.debugHttpClient = MockClient((request) async {
+          return http.Response(
+            jsonEncode({'error': 'wrong_environment'}),
+            400,
+            headers: {'content-type': 'application/json'},
+          );
+        });
+        await expectLater(
+          TapAppLink.applyCode('HOLD'),
+          throwsA(isA<TapAppLinkWrongEnvironmentException>()),
+        );
+      });
+    });
+
+    test('other non-definitive error keeps the pending requestId', () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        requests.add(request);
+        return http.Response(
+          jsonEncode({'error': 'rate_limited', 'message': 'Slow down'}),
+          429,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      await expectLater(
+        TapAppLink.applyCode('SARAH10'),
+        throwsA(isA<TapAppLinkApplyCodeOtherException>()),
+      );
+      final pendingId = TapAppLink.debugPendingRedeemRequestId;
+      expect(pendingId, isNotNull);
+
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        requests.add(request);
+        return http.Response(
+          jsonEncode({'attributionId': 'attr_after_other'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+      await TapAppLink.applyCode('SARAH10');
+      final retryBody = jsonDecode(requests.last.body) as Map<String, dynamic>;
+      expect(retryBody['requestId'], pendingId);
     });
   });
 }
