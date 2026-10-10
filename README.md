@@ -41,16 +41,28 @@ Purchases are attributed through billing webhooks. Leave out a client `trackPurc
 
 ## Applying a code
 
-`applyCode` returns success JSON only on a real 2xx result. Map each outcome to UI state like this:
+`applyCode` returns success JSON only on a real 2xx result. Map each outcome to UI state like this.
+
+On a network or timeout error only (never unknown, inactive or wrongEnvironment), retry `applyCode` once with the same code. That automatic retry is safe from 0.3.2 because the SDK reuses its request ID, so the server won't count the install twice. If the retry also fails, show the network copy with a Try again button.
 
 ```dart
 String title;
 String? subtitle;
 String? shownCode;
 String? offerLine;
+var showTryAgain = false;
+
+Future<Map<String, dynamic>> applyCodeOnceOrRetry(String code) async {
+  try {
+    return await TapAppLink.applyCode(code);
+  } on TapAppLinkNetworkException {
+    // Network / timeout only: retry once. Safe from 0.3.2 (request ID reuse).
+    return await TapAppLink.applyCode(code);
+  }
+}
 
 try {
-  final result = await TapAppLink.applyCode(code);
+  final result = await applyCodeOnceOrRetry(code);
   final offerJson = result['offer'];
   if (offerJson is Map) {
     final name = offerJson['creatorName'];
@@ -86,7 +98,9 @@ try {
   title = 'This code is no longer active.';
   subtitle = 'You can still subscribe at the regular price.';
 } on TapAppLinkNetworkException {
+  // N6: auto-retry already failed. Offer a manual Try again.
   title = "We couldn't check your code. Check your connection and try again.";
+  showTryAgain = true;
 } on TapAppLinkApplyCodeOtherException catch (error) {
   title = "We couldn't check your code. Check your connection and try again.";
   debugPrint('applyCode failed status=${error.status} message=${error.message}');
