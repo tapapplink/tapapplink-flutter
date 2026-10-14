@@ -6,7 +6,7 @@ Attribution SDK for Flutter. Call `configure`, `trackInstall`, and `setAppUserId
 
 ```yaml
 dependencies:
-  tapapplink: ^0.3.2
+  tapapplink: ^0.3.3
 ```
 
 Then `flutter pub get`.
@@ -31,7 +31,7 @@ await TapAppLink.setAppUserId(await Purchases.appUserID);
 final offer = TapAppLink.getOffer();
 ```
 
-`trackInstall()` is safe on every launch. It creates a stable `installId` once, posts `/ingestInstall` only on the first open, and restores the attribution id and offer from local storage on later launches. On Android it reads the Play Install Referrer unless you pass `installReferrer:` yourself. iOS and other platforms skip the native referrer.
+`trackInstall()` is safe on every launch. It creates a stable `installId` once, posts `/ingestInstall` only on the first open, and restores the attribution id and offer from local storage on later launches. On Android it reads the Play Install Referrer unless you pass `installReferrer:` yourself. iOS and other platforms skip the native referrer. `setAppUserId` sends that stored `attributionId` after hydrate, posts `/ingestIdentify` only when the app user id changes, and coalesces concurrent identical calls.
 
 Set `debug: true` on `TapAppLinkConfig` to log each request, response and stored state. The API key is redacted in those logs.
 
@@ -43,7 +43,7 @@ Purchases are attributed through billing webhooks. Leave out a client `trackPurc
 
 `applyCode` returns success JSON only on a real 2xx result. Map each outcome to UI state like this.
 
-On a network or timeout error only (never unknown, inactive or wrongEnvironment), retry `applyCode` once with the same code. That automatic retry is safe from 0.3.2 because the SDK reuses its request ID, so the server won't count the install twice. If the retry also fails, show the network copy with a Try again button.
+On a network or timeout error only (never unknown, inactive or wrongEnvironment), retry `applyCode` once with the same code. That automatic retry is safe from 0.3.2 because the SDK reuses its request ID, so the server won't count the install twice. If the retry also fails, show the network copy with a Try again button. From 0.3.3, success results may include optional `codeMatches` and `offer.creatorName`.
 
 ```dart
 String title;
@@ -52,7 +52,7 @@ String? shownCode;
 String? offerLine;
 var showTryAgain = false;
 
-Future<Map<String, dynamic>> applyCodeOnceOrRetry(String code) async {
+Future<TapAppLinkRedeemResult> applyCodeOnceOrRetry(String code) async {
   try {
     return await TapAppLink.applyCode(code);
   } on TapAppLinkNetworkException {
@@ -63,19 +63,14 @@ Future<Map<String, dynamic>> applyCodeOnceOrRetry(String code) async {
 
 try {
   final result = await applyCodeOnceOrRetry(code);
-  final offerJson = result['offer'];
-  if (offerJson is Map) {
-    final name = offerJson['creatorName'];
-    final promo = offerJson['promoCode'];
-    if (name is String && name.isNotEmpty) {
-      offerLine = promo is String && promo.isNotEmpty
-          ? '$name · $promo'
-          : name;
-    }
+  final name = result.offer?.creatorName;
+  final promo = result.offer?.promoCode;
+  if (name != null && name.isNotEmpty) {
+    offerLine = promo != null && promo.isNotEmpty ? '$name · $promo' : name;
   }
 
-  if (result['alreadyAttributed'] == true) {
-    // Success with alreadyAttributed true
+  if (result.alreadyAttributed == true) {
+    // Success with alreadyAttributed true (may also include codeMatches)
     title = "You're all set";
     shownCode = null; // hide the code
     subtitle = offerLine;
@@ -124,11 +119,11 @@ CI runs format, analyse, test, publish dry-run, and an example Android debug bui
 Releases publish to [pub.dev](https://pub.dev/packages/tapapplink) from GitHub Actions via OIDC (no stored token). Push a tag that matches the package version, for example:
 
 ```bash
-git tag v0.3.2
-git push origin v0.3.2
+git tag v0.3.3
+git push origin v0.3.3
 ```
 
-The `version` in `pubspec.yaml` must match the tag (here `0.3.2`).
+The `version` in `pubspec.yaml` must match the tag (here `0.3.3`).
 
 ### One-time pub.dev admin setting (Kenny)
 

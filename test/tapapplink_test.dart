@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -44,8 +45,8 @@ void main() {
     expect(TapAppLink.getInstallId(), isNull);
   });
 
-  test('sdkVersion is 0.3.2', () {
-    expect(TapAppLink.sdkVersion, '0.3.2');
+  test('sdkVersion is 0.3.3', () {
+    expect(TapAppLink.sdkVersion, '0.3.3');
   });
 
   test('TapAppLinkConfig holds publicKey, environment, ingestUrl and debug',
@@ -172,12 +173,206 @@ void main() {
     expect(requests.single.url.path, endsWith('/ingestIdentify'));
     expect(
       requests.single.headers['X-TapAppLink-SDK-Version'],
-      '0.3.2',
+      '0.3.3',
     );
     final body = jsonDecode(requests.single.body) as Map<String, dynamic>;
     expect(body['appUserId'], 'user_9');
     expect(body['attributionId'], 'attr_stored');
     expect(TapAppLink.getAppUserId(), 'user_9');
+  });
+
+  test(
+      'skips ingestIdentify when appUserId matches the last successful identify',
+      () async {
+    configureSandbox();
+    TapAppLink.debugHttpClient = MockClient((request) async {
+      requests.add(request);
+      if (request.url.path.endsWith('/ingestInstall')) {
+        return http.Response(
+          jsonEncode({'attributionId': 'attr_id'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response(
+        jsonEncode({'ok': true}),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    await TapAppLink.trackInstall();
+    final first = await TapAppLink.setAppUserId('user_same');
+    final second = await TapAppLink.setAppUserId('user_same');
+
+    expect(first['ok'], isTrue);
+    expect(second['skipped'], isTrue);
+    expect(second['appUserId'], 'user_same');
+    expect(second['attributionId'], 'attr_id');
+    expect(requests.where((r) => r.url.path.endsWith('/ingestIdentify')),
+        hasLength(1));
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('tapapplink.appUserId'), 'user_same');
+  });
+
+  test(
+      'does not post ingestIdentify again after a cold start with the same appUserId',
+      () async {
+    configureSandbox();
+    TapAppLink.debugHttpClient = MockClient((request) async {
+      requests.add(request);
+      if (request.url.path.endsWith('/ingestInstall')) {
+        return http.Response(
+          jsonEncode({'attributionId': 'attr_cold_id'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response(
+        jsonEncode({'ok': true}),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    await TapAppLink.trackInstall();
+    await TapAppLink.setAppUserId('user_persisted');
+    expect(
+      requests.where((r) => r.url.path.endsWith('/ingestIdentify')),
+      hasLength(1),
+    );
+
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('tapapplink.appUserId'), 'user_persisted');
+    TapAppLink.debugClearMemory();
+    configureSandbox();
+
+    final afterCold = await TapAppLink.setAppUserId('user_persisted');
+    expect(afterCold['skipped'], isTrue);
+    expect(afterCold['appUserId'], 'user_persisted');
+    expect(afterCold['attributionId'], 'attr_cold_id');
+    expect(
+      requests.where((r) => r.url.path.endsWith('/ingestIdentify')),
+      hasLength(1),
+    );
+    expect(TapAppLink.getAppUserId(), 'user_persisted');
+  });
+
+  test('coalesces concurrent identical setAppUserId calls into one POST',
+      () async {
+    configureSandbox();
+    final identifyStarted = Completer<void>();
+    final resolveIdentify = Completer<void>();
+    TapAppLink.debugHttpClient = MockClient((request) async {
+      requests.add(request);
+      if (request.url.path.endsWith('/ingestInstall')) {
+        return http.Response(
+          jsonEncode({'attributionId': 'attr_coalesce'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (!identifyStarted.isCompleted) {
+        identifyStarted.complete();
+      }
+      await resolveIdentify.future;
+      return http.Response(
+        jsonEncode({'ok': true}),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    await TapAppLink.trackInstall();
+    final a = TapAppLink.setAppUserId('user_coalesce');
+    await identifyStarted.future;
+    final b = TapAppLink.setAppUserId('user_coalesce');
+    final c = TapAppLink.setAppUserId('user_coalesce');
+    resolveIdentify.complete();
+    final results = await Future.wait([a, b, c]);
+
+    expect(results[0], results[1]);
+    expect(results[1], results[2]);
+    expect(results[0]['ok'], isTrue);
+    expect(
+      requests.where((r) => r.url.path.endsWith('/ingestIdentify')),
+      hasLength(1),
+    );
+  });
+
+  test('posts ingestIdentify again when appUserId changes', () async {
+    configureSandbox();
+    TapAppLink.debugHttpClient = MockClient((request) async {
+      requests.add(request);
+      if (request.url.path.endsWith('/ingestInstall')) {
+        return http.Response(
+          jsonEncode({'attributionId': 'attr_change'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response(
+        jsonEncode({'ok': true}),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    await TapAppLink.trackInstall();
+    await TapAppLink.setAppUserId('user_a');
+    await TapAppLink.setAppUserId('user_b');
+
+    final identifyBodies = requests
+        .where((r) => r.url.path.endsWith('/ingestIdentify'))
+        .map((r) => jsonDecode(r.body) as Map<String, dynamic>)
+        .toList();
+    expect(identifyBodies, hasLength(2));
+    expect(identifyBodies[1]['appUserId'], 'user_b');
+    expect(TapAppLink.getAppUserId(), 'user_b');
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('tapapplink.appUserId'), 'user_b');
+  });
+
+  test('does not skip identify after a failed ingestIdentify', () async {
+    configureSandbox();
+    var identifyAttempts = 0;
+    TapAppLink.debugHttpClient = MockClient((request) async {
+      requests.add(request);
+      if (request.url.path.endsWith('/ingestInstall')) {
+        return http.Response(
+          jsonEncode({'attributionId': 'attr_fail'}),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      identifyAttempts += 1;
+      if (identifyAttempts == 1) {
+        return http.Response(
+          jsonEncode({'message': 'identify failed'}),
+          500,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response(
+        jsonEncode({'ok': true}),
+        200,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    await TapAppLink.trackInstall();
+    await expectLater(
+      TapAppLink.setAppUserId('user_retry'),
+      throwsA(isA<HttpException>()),
+    );
+    final prefsAfterFail = await SharedPreferences.getInstance();
+    expect(prefsAfterFail.getString('tapapplink.appUserId'), isNull);
+
+    final retry = await TapAppLink.setAppUserId('user_retry');
+    expect(retry['ok'], isTrue);
+    expect(identifyAttempts, 2);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('tapapplink.appUserId'), 'user_retry');
   });
 
   test('trackInstall throws if configure was not called', () async {
@@ -270,6 +465,8 @@ void main() {
         return http.Response(
           jsonEncode({
             'attributionId': 'attr_new',
+            'alreadyAttributed': false,
+            'codeMatches': true,
             'offer': {
               'creatorName': 'Sarah',
               'promoCode': 'SARAH10',
@@ -281,12 +478,14 @@ void main() {
       });
 
       final result = await TapAppLink.applyCode('SARAH10');
-      expect(result['attributionId'], 'attr_new');
-      expect(result.containsKey('alreadyAttributed'), isFalse);
+      expect(result.attributionId, 'attr_new');
+      expect(result.alreadyAttributed, isFalse);
+      expect(result.codeMatches, isTrue);
+      expect(result.offer?.creatorName, 'Sarah');
       expect(requests.single.url.path, endsWith('/redeemCode'));
       expect(
         requests.single.headers['X-TapAppLink-SDK-Version'],
-        '0.3.2',
+        '0.3.3',
       );
       final body = jsonDecode(requests.single.body) as Map<String, dynamic>;
       expect(body['requestId'], isA<String>());
@@ -303,17 +502,49 @@ void main() {
         return http.Response(
           jsonEncode({
             'alreadyAttributed': true,
+            'codeMatches': false,
             'attributionId': 'attr_existing',
-            'offer': {'creatorName': 'Sarah', 'promoCode': 'SARAH10'},
+            'offer': {
+              'creatorName': 'Sarah',
+              'promoCode': 'SARAH10',
+              'billingOfferId': 'offer_1',
+            },
           }),
           200,
           headers: {'content-type': 'application/json'},
         );
       });
 
-      final result = await TapAppLink.applyCode('SARAH10');
-      expect(result['alreadyAttributed'], isTrue);
+      final result = await TapAppLink.applyCode('OTHER');
+      expect(result.alreadyAttributed, isTrue);
+      expect(result.codeMatches, isFalse);
+      expect(result.offer?.creatorName, 'Sarah');
+      expect(result.offer?.promoCode, 'SARAH10');
       expect(TapAppLink.getAttributionId(), 'attr_existing');
+      expect(TapAppLink.getOffer()?.creatorName, 'Sarah');
+    });
+
+    test(
+        'redeem result leaves codeMatches and creatorName nullable when absent',
+        () async {
+      configureSandbox();
+      TapAppLink.debugHttpClient = MockClient((request) async {
+        return http.Response(
+          jsonEncode({
+            'attributionId': 'attr_minimal',
+            'offer': {'promoCode': 'CODE'},
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final result = await TapAppLink.applyCode('CODE');
+      expect(result.attributionId, 'attr_minimal');
+      expect(result.codeMatches, isNull);
+      expect(result.alreadyAttributed, isNull);
+      expect(result.offer?.creatorName, isNull);
+      expect(result.offer?.promoCode, 'CODE');
     });
 
     test('unknown_code body on 404 throws TapAppLinkUnknownCodeException',
@@ -496,7 +727,7 @@ void main() {
       expect(firstId, isNotNull);
 
       final result = await TapAppLink.applyCode('sarah-10');
-      expect(result['attributionId'], 'attr_1');
+      expect(result.attributionId, 'attr_1');
       expect(requests, hasLength(2));
       final firstBody = jsonDecode(requests[0].body) as Map<String, dynamic>;
       final secondBody = jsonDecode(requests[1].body) as Map<String, dynamic>;

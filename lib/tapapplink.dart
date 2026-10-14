@@ -55,6 +55,78 @@ class TapAppLinkOffer {
   }
 }
 
+/// Offer fields on a successful `/redeemCode` response.
+///
+/// Server fields are optional so older clients keep type-checking. Prefer
+/// [TapAppLinkOffer] from [TapAppLink.getOffer] for the cached attribution offer.
+class TapAppLinkRedeemOffer {
+  const TapAppLinkRedeemOffer({
+    this.creatorName,
+    this.promoCode,
+    this.billingOfferId,
+  });
+
+  final String? creatorName;
+  final String? promoCode;
+  final String? billingOfferId;
+
+  Map<String, dynamic> toJson() => {
+        if (creatorName != null) 'creatorName': creatorName,
+        if (promoCode != null) 'promoCode': promoCode,
+        if (billingOfferId != null) 'billingOfferId': billingOfferId,
+      };
+
+  static TapAppLinkRedeemOffer? fromJson(Map<String, dynamic>? json) {
+    if (json == null) {
+      return null;
+    }
+    return TapAppLinkRedeemOffer(
+      creatorName: json['creatorName'] as String?,
+      promoCode: json['promoCode'] as String?,
+      billingOfferId: json['billingOfferId'] as String?,
+    );
+  }
+}
+
+/// Success body from `/redeemCode`. New fields from the server are optional so
+/// older clients keep type-checking.
+class TapAppLinkRedeemResult {
+  const TapAppLinkRedeemResult({
+    this.attributionId,
+    this.alreadyAttributed,
+    this.codeMatches,
+    this.offer,
+  });
+
+  final String? attributionId;
+  final bool? alreadyAttributed;
+
+  /// True when the submitted code matches the attributed creator offer.
+  final bool? codeMatches;
+  final TapAppLinkRedeemOffer? offer;
+
+  Map<String, dynamic> toJson() => {
+        if (attributionId != null) 'attributionId': attributionId,
+        if (alreadyAttributed != null) 'alreadyAttributed': alreadyAttributed,
+        if (codeMatches != null) 'codeMatches': codeMatches,
+        if (offer != null) 'offer': offer!.toJson(),
+      };
+
+  factory TapAppLinkRedeemResult.fromJson(Map<String, dynamic> json) {
+    final rawOffer = json['offer'];
+    return TapAppLinkRedeemResult(
+      attributionId: json['attributionId'] as String?,
+      alreadyAttributed: json['alreadyAttributed'] as bool?,
+      codeMatches: json['codeMatches'] as bool?,
+      offer: rawOffer is Map
+          ? TapAppLinkRedeemOffer.fromJson(
+              Map<String, dynamic>.from(rawOffer),
+            )
+          : null,
+    );
+  }
+}
+
 /// Thrown by [TapAppLink.applyCode] when redeem fails.
 ///
 /// Cases: [TapAppLinkUnknownCodeException], [TapAppLinkInactiveCodeException],
@@ -124,7 +196,7 @@ class TapAppLink {
   TapAppLink._();
 
   /// Package / wire version sent as `X-TapAppLink-SDK-Version`.
-  static const String sdkVersion = '0.3.2';
+  static const String sdkVersion = '0.3.3';
 
   static const MethodChannel _installReferrerChannel =
       MethodChannel('com.tapapplink/tapapplink');
@@ -133,6 +205,8 @@ class TapAppLink {
   static const String _prefsTracked = 'tapapplink.tracked';
   static const String _prefsAttributionId = 'tapapplink.attributionId';
   static const String _prefsOffer = 'tapapplink.offer';
+
+  /// Last app user id that successfully completed `/ingestIdentify`.
   static const String _prefsAppUserId = 'tapapplink.appUserId';
   static const String _prefsPendingRedeemRequestId =
       'tapapplink.pendingRedeemRequestId';
@@ -144,9 +218,16 @@ class TapAppLink {
   static String? _installId;
   static String? _lastAttributionId;
   static String? _lastAppUserId;
+
+  /// Last app user id that successfully completed `/ingestIdentify` (persisted).
+  static String? _identifiedAppUserId;
   static TapAppLinkOffer? _lastOffer;
   static String? _pendingRedeemRequestId;
   static String? _pendingRedeemCode;
+
+  /// Coalesce concurrent identical [setAppUserId] calls into one POST.
+  static final Map<String, Future<Map<String, dynamic>>> _identifyInFlight =
+      <String, Future<Map<String, dynamic>>>{};
 
   /// Override for tests. When null, a real [http.Client] is used.
   @visibleForTesting
@@ -196,25 +277,61 @@ class TapAppLink {
     return result;
   }
 
+  /// Links the billing user id via `/ingestIdentify`.
+  ///
+  /// Skips the network call when [appUserId] matches the last successfully
+  /// identified value (persisted like the install tracked flag). Concurrent
+  /// identical calls share one in-flight request. A different id still posts.
   static Future<Map<String, dynamic>> setAppUserId(String appUserId) async {
     await _ensureLoaded();
     _lastAppUserId = appUserId;
-    await _persistState();
-    return _post('/ingestIdentify', {
-      'appUserId': appUserId,
-      'attributionId': _lastAttributionId,
-    });
+
+    if (_identifiedAppUserId == appUserId) {
+      final skipped = <String, dynamic>{
+        'skipped': true,
+        'appUserId': appUserId,
+        if (_lastAttributionId != null) 'attributionId': _lastAttributionId,
+      };
+      _log('setAppUserId skipped; already identified $skipped');
+      return skipped;
+    }
+
+    final existing = _identifyInFlight[appUserId];
+    if (existing != null) {
+      _log(
+          'setAppUserId coalesced with in-flight identify appUserId=$appUserId');
+      return existing;
+    }
+
+    final future = () async {
+      try {
+        final result = await _post('/ingestIdentify', {
+          'appUserId': appUserId,
+          'attributionId': _lastAttributionId,
+        });
+        _identifiedAppUserId = appUserId;
+        await _persistState();
+        return result;
+      } finally {
+        _identifyInFlight.remove(appUserId);
+      }
+    }();
+
+    _identifyInFlight[appUserId] = future;
+    return future;
   }
 
   /// Redeems a creator code via `/redeemCode`.
   ///
-  /// On success returns the server JSON (may include `alreadyAttributed` and
-  /// `offer`). On failure throws a [TapAppLinkApplyCodeException] subclass.
+  /// On success returns a [TapAppLinkRedeemResult] (may include
+  /// `alreadyAttributed`, `codeMatches`, and `offer` with optional
+  /// `creatorName`). On failure throws a [TapAppLinkApplyCodeException]
+  /// subclass.
   ///
   /// Sends a stable `requestId` per normalised code attempt so the server can
   /// recognise retries after a timeout or app restart. Definitive responses
   /// (2xx, or unknown / inactive / wrong-environment) clear the pending id.
-  static Future<Map<String, dynamic>> applyCode(String code) async {
+  static Future<TapAppLinkRedeemResult> applyCode(String code) async {
     await _ensureLoaded();
     final requestId = await _ensureRedeemRequestId(code);
     final platform = _platformName();
@@ -229,7 +346,7 @@ class TapAppLink {
       await _clearPendingRedeem();
       _cacheFromResult(result);
       await _persistState();
-      return result;
+      return TapAppLinkRedeemResult.fromJson(result);
     } on TapAppLinkUnknownCodeException {
       await _clearPendingRedeem();
       rethrow;
@@ -280,10 +397,12 @@ class TapAppLink {
     _installId = null;
     _lastAttributionId = null;
     _lastAppUserId = null;
+    _identifiedAppUserId = null;
     _lastOffer = null;
     _pendingRedeemRequestId = null;
     _pendingRedeemCode = null;
     _storageLoaded = false;
+    _identifyInFlight.clear();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_prefsInstallId);
     await prefs.remove(_prefsTracked);
@@ -301,10 +420,12 @@ class TapAppLink {
     _installId = null;
     _lastAttributionId = null;
     _lastAppUserId = null;
+    _identifiedAppUserId = null;
     _lastOffer = null;
     _pendingRedeemRequestId = null;
     _pendingRedeemCode = null;
     _storageLoaded = false;
+    _identifyInFlight.clear();
   }
 
   /// Pending redeem request id after a non-definitive attempt (test helper).
@@ -323,7 +444,10 @@ class TapAppLink {
     _installId = prefs.getString(_prefsInstallId);
     _tracked = prefs.getBool(_prefsTracked) ?? false;
     _lastAttributionId = prefs.getString(_prefsAttributionId);
-    _lastAppUserId = prefs.getString(_prefsAppUserId);
+    _identifiedAppUserId = prefs.getString(_prefsAppUserId);
+    if (_identifiedAppUserId != null) {
+      _lastAppUserId = _identifiedAppUserId;
+    }
     _pendingRedeemRequestId = prefs.getString(_prefsPendingRedeemRequestId);
     _pendingRedeemCode = prefs.getString(_prefsPendingRedeemCode);
     final offerRaw = prefs.getString(_prefsOffer);
@@ -363,11 +487,11 @@ class TapAppLink {
     } else {
       await prefs.setString(_prefsAttributionId, attributionId);
     }
-    final appUserId = _lastAppUserId;
-    if (appUserId == null) {
+    final identifiedAppUserId = _identifiedAppUserId;
+    if (identifiedAppUserId == null) {
       await prefs.remove(_prefsAppUserId);
     } else {
-      await prefs.setString(_prefsAppUserId, appUserId);
+      await prefs.setString(_prefsAppUserId, identifiedAppUserId);
     }
     final offer = _lastOffer;
     if (offer == null) {
@@ -607,7 +731,8 @@ class TapAppLink {
 
   static String _describeStoredState() {
     return 'tracked=$_tracked installId=$_installId '
-        'attributionId=$_lastAttributionId appUserId=$_lastAppUserId '
+        'attributionId=$_lastAttributionId '
+        'appUserId=$_lastAppUserId identifiedAppUserId=$_identifiedAppUserId '
         'offer=${_lastOffer?.toJson()} '
         'pendingRedeem=$_pendingRedeemCode/$_pendingRedeemRequestId';
   }
